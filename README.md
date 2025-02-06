@@ -1,15 +1,3 @@
----
-title: Innodata Poc
-emoji: 🐨
-colorFrom: gray
-colorTo: purple
-sdk: streamlit
-sdk_version: 1.42.0
-app_file: app.py
-pinned: false
-short_description: This is a POC app for an interview purpose.
----
-
 # Legal Document RAG with Taxonomy-Aware Hybrid Search 
 
 A powerful Q&A application for legal documents that leverages Hybrid Search and Retrieval-Augmented Generation (RAG) with built-in legal taxonomy awareness. Built with RAGLite for robust document processing and retrieval and Streamlit for an intuitive chat interface, this system provides intelligent answers to legal queries while maintaining awareness of key legal domain concepts.
