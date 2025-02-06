@@ -40,20 +40,6 @@ A powerful Q&A application for legal documents that leverages Hybrid Search and 
     - Progress tracking during document processing
     - Interactive chat interface with conversation history
 
-- **Template-Based Configuration**:
-    - The application uses Jinja2 templates for managing prompts and taxonomies, following software engineering best practices:
-
-    - **Separation of Concerns**:
-        - Prompts and taxonomies are maintained in separate template files
-        - `templates/prompts.j2`: Contains all system prompts (RAG, extraction, fallback)
-        - `templates/taxonomy.j2`: Contains the comprehensive legal taxonomy keywords
-        
-    - **Benefits**:
-        - **Maintainability**: Edit prompts and taxonomies without touching application code
-        - **Version Control**: Track changes to prompts and taxonomies separately
-        - **Environment Flexibility**: Support different prompts/taxonomies per environment
-        - **Reusability**: Templates can be shared across multiple applications
-        - **Readability**: Clean separation between logic and content
 
 ## System Architecture
 
@@ -171,6 +157,9 @@ You'll need the following API keys:
    ```bash
    conda install -c conda-forge pypandoc pandoc
    ```
+   - install poppler-utils for converting pdf pages to images
+
+
 
 ## Usage
 
