@@ -17,11 +17,10 @@ import warnings
 # import pypandoc
 # pypandoc.download_pandoc()
 
-
-# Setup logging and ignore specific warnings.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*torch.classes.*")
+
 
 # Define the system prompt for the RAG assistant.
 RAG_SYSTEM_PROMPT = """
@@ -100,11 +99,10 @@ def extract_taxonomy_keywords_automatic(text: str, taxonomy: list) -> list:
             found_keywords.append(keyword)
     return found_keywords
 
+
 # ------------------------------------------
 # 3. Intelligent Taxonomy Extraction (LLM-based)
 # ------------------------------------------
-
-
 def extract_taxonomy_keywords_intelligent(text: str, taxonomy: list) -> tuple:
     """
     Uses GPT-4o-mini to extract taxonomy keywords from the page content.
@@ -115,7 +113,6 @@ def extract_taxonomy_keywords_intelligent(text: str, taxonomy: list) -> tuple:
     If no exact matches are found, only related_keywords are provided.
     """
     try:
-        # Mimic the fallback function style.
         client = openai.OpenAI(
             api_key=st.session_state.user_env["OPENAI_API_KEY"])
         system_prompt = (
@@ -200,11 +197,10 @@ def parse_chunk_text(chunk_text: str):
                     taxonomy_info = line.split("Taxonomy:")[1].strip()
     return doc_name, doc_hash, page_num, taxonomy_info, content
 
+
 # ------------------------------------------
 # 5. Configuration Initialization
 # ------------------------------------------
-
-
 def initialize_config(openai_key: str, cohere_key: str, db_url: str) -> RAGLiteConfig:
     try:
         os.environ["OPENAI_API_KEY"] = openai_key
@@ -221,11 +217,10 @@ def initialize_config(openai_key: str, cohere_key: str, db_url: str) -> RAGLiteC
     except Exception as e:
         raise ValueError(f"Configuration error: {e}")
 
+
 # ------------------------------------------
 # 6. Document Processing: Page-Wise Chunking with Metadata Injection and Progress UI
 # ------------------------------------------
-
-
 def process_document(file_path: str, doc_hash: str, doc_name: str) -> bool:
     try:
         if not st.session_state.get('my_config'):
@@ -312,11 +307,10 @@ def process_document(file_path: str, doc_hash: str, doc_name: str) -> bool:
         logger.error(f"Error processing document: {str(e)}")
         return False
 
-# ------------------------------------------
-# 7. Search and Fallback Functions
-# ------------------------------------------
 
-
+# ------------------------------------------
+# 7. Search Function
+# ------------------------------------------
 def perform_search(query: str) -> List:
     try:
         chunk_ids, scores = hybrid_search(
@@ -330,6 +324,9 @@ def perform_search(query: str) -> List:
         return []
 
 
+# ------------------------------------------
+# 8. Fallback Function
+# ------------------------------------------
 def handle_fallback(query: str) -> str:
     try:
         client = openai.OpenAI(
@@ -354,11 +351,10 @@ def handle_fallback(query: str) -> str:
         st.error(f"Fallback error: {str(e)}")
         return "I apologize, but I encountered an error while processing your request. Please try again."
 
-# ------------------------------------------
-# 8. Main Streamlit App
-# ------------------------------------------
 
-
+# ------------------------------------------
+# 9. Main Streamlit App
+# ------------------------------------------
 def main():
     st.set_page_config(page_title="Innodata - Taxonomy RAG POC", layout="wide")
     for state_var in ['chat_history', 'documents_loaded', 'my_config', 'user_env', 'processed_pdf_hashes', 'pdf_files']:
