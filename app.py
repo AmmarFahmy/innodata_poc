@@ -1,3 +1,4 @@
+from pdf2image import convert_from_bytes
 import os
 import re
 import json
@@ -13,7 +14,9 @@ import openai
 import time
 import warnings
 
-from pdf2image import convert_from_bytes
+# import pypandoc
+# pypandoc.download_pandoc()
+
 
 # Setup logging and ignore specific warnings.
 logging.basicConfig(level=logging.INFO)

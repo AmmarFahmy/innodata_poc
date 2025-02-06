@@ -1,3 +1,15 @@
+---
+title: Innodata Poc
+emoji: 🐨
+colorFrom: gray
+colorTo: purple
+sdk: streamlit
+sdk_version: 1.42.0
+app_file: app.py
+pinned: false
+short_description: This is a POC app for an interview purpose.
+---
+
 # Legal Document RAG with Taxonomy-Aware Hybrid Search 
 
 A powerful Q&A application for legal documents that leverages Hybrid Search and Retrieval-Augmented Generation (RAG) with built-in legal taxonomy awareness. Built with RAGLite for robust document processing and retrieval and Streamlit for an intuitive chat interface, this system provides intelligent answers to legal queries while maintaining awareness of key legal domain concepts.
@@ -40,6 +52,106 @@ A powerful Q&A application for legal documents that leverages Hybrid Search and 
     - Progress tracking during document processing
     - Interactive chat interface with conversation history
 
+- **Template-Based Configuration**:
+    - The application uses Jinja2 templates for managing prompts and taxonomies, following software engineering best practices:
+
+    - **Separation of Concerns**:
+        - Prompts and taxonomies are maintained in separate template files
+        - `templates/prompts.j2`: Contains all system prompts (RAG, extraction, fallback)
+        - `templates/taxonomy.j2`: Contains the comprehensive legal taxonomy keywords
+        
+    - **Benefits**:
+        - **Maintainability**: Edit prompts and taxonomies without touching application code
+        - **Version Control**: Track changes to prompts and taxonomies separately
+        - **Environment Flexibility**: Support different prompts/taxonomies per environment
+        - **Reusability**: Templates can be shared across multiple applications
+        - **Readability**: Clean separation between logic and content
+
+## System Architecture
+
+The following flowchart illustrates the complete system pipeline from initial configuration to final answer generation:
+
+```mermaid
+flowchart TD
+    subgraph Configuration["Initial Configuration"]
+        Config["Configure API Keys & DB"]
+        Mode["Select Taxonomy Mode:<br>Automatic or Intelligent"]
+    end
+
+    subgraph Upload_Duplicate_Check["Upload & Duplicate Check"]
+        A["User Uploads PDF"]
+        D["Store PDF Bytes in Session"]
+        Hash["Generate MD5 Hash"]
+        DupCheck{"Is Duplicate?"}
+    end
+
+    subgraph Document_Processing["Document Processing <br> Chunking & Taxonomy Extraction"]
+        E["Document Processing"]
+        F["Read PDF using PyPDF2"]
+        G["Split PDF into Pages"]
+        H["For Each Page: Extract Text"]
+        TaxMode{"Extraction Mode?"}
+        I1["Automatic: Extract Keywords<br>using Regex"]
+        I2["Intelligent: Use GPT-4o-mini<br>for Keyword Extraction"]
+        J["Generate Temporary File with Header:<br>Document, DocHash, Page, Taxonomy"]
+        K["Call insert_document<br>Chunk Ingestion"]
+        L["Store Chunk in Database"]
+        M["Update Processing Progress & Complete"]
+    end
+
+    subgraph Query_Search_Flow["Query & Search Flow"]
+        N["User Enters Query in Chat"]
+        O["Perform Hybrid Search<br>hybrid_search"]
+        P["Retrieve Chunks<br>retrieve_chunks"]
+        Q["Re-rank Chunks<br>rerank_chunks"]
+        R{"Relevant Chunk Found?"}
+        S["Select Top Matched Chunk"]
+        T["Fallback: General Knowledge<br>GPT-4o-mini"]
+    end
+
+    subgraph Answer_Generation_UI["Answer Generation & UI"]
+        U["Call rag for Answer Generation"]
+        V["Stream Generated Answer to User"]
+        W["Expander: Top Matched Source"]
+        X["Parse Chunk Header for:<br>Document, Page, Taxonomy"]
+        Y["Convert PDF Page to Image"]
+        Z["Display PDF Page Image &<br>Taxonomy Information"]
+    end
+
+    Config --> Mode
+    Mode --> A
+    A --> Hash
+    Hash --> DupCheck
+    DupCheck -- Yes --> A
+    DupCheck -- No --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> TaxMode
+    TaxMode -- Automatic --> I1
+    TaxMode -- Intelligent --> I2
+    I1 --> J
+    I2 --> J
+    J --> K
+    K --> L
+    L --> M
+    M --> N
+    N --> O
+    O --> P
+    P --> Q
+    Q --> R
+    R -- Yes --> S
+    R -- No --> T
+    T --> V
+    S --> U
+    U --> V
+    V --> W
+    W --> X
+    X --> Y
+    Y --> Z
+```
+
 ## Prerequisites
 
 You'll need the following API keys:
@@ -53,7 +165,11 @@ You'll need the following API keys:
 
 2. **Database Setup** (Optional):
    - Default: SQLite (no setup required)
-   - Alternatively: Use any SQLAlchemy-compatible database
+   - Alternatively: Use any SQLAlchemy-compatible database (e.g. PostgreSQL, MySQL, etc.)
+     PostgreSQL:
+     - Create a free serverless PostgreSQL database at [Neon](https://neon.tech/)
+     - Get instant provisioning and scale-to-zero capability
+     - Connection string format: postgresql://neondb_owner:**************lQ@zp-bro0d-cake-somestring-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require
 
 ## Installation
 
