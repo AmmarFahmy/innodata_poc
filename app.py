@@ -1,332 +1,518 @@
-import streamlit as st
-import sqlite3
-import hashlib
-import PyPDF2
-from openai import OpenAI
-import io
+import os
+import re
 import json
+import hashlib
+import logging
+import streamlit as st
+import PyPDF2
+from raglite import RAGLiteConfig, insert_document, hybrid_search, retrieve_chunks, rerank_chunks, rag
+from rerankers import Reranker
+from typing import List
+from pathlib import Path
+import openai
+import time
+import warnings
+
 from pdf2image import convert_from_bytes
-from PIL import Image
 
-# Initialize SQLite database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # Create users table if not exists
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
-    
-    # Add default users if they don't exist
-    c.execute("SELECT * FROM users WHERE username='admin'")
-    if not c.fetchone():
-        admin_pass = hashlib.sha256("admin".encode()).hexdigest()
-        c.execute("INSERT INTO users VALUES (?, ?, ?)", ("admin", admin_pass, "admin"))
-    
-    c.execute("SELECT * FROM users WHERE username='user'")
-    if not c.fetchone():
-        user_pass = hashlib.sha256("user".encode()).hexdigest()
-        c.execute("INSERT INTO users VALUES (?, ?, ?)", ("user", user_pass, "user"))
-    
-    # Create PDF metadata table if not exists (without dropping)
-    c.execute('''CREATE TABLE IF NOT EXISTS pdf_metadata
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  file_name TEXT,
-                  page_number INTEGER,
-                  page_content TEXT,
-                  page_image BLOB,
-                  keywords TEXT,
-                  embeddings TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    conn.commit()
-    conn.close()
+# Setup logging and ignore specific warnings.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore", message=".*torch.classes.*")
 
-# Verify login credentials
-def verify_login(username, password):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    hashed_password = hashlib.sha256(password.encode()).hexdigest()
-    c.execute("SELECT role FROM users WHERE username=? AND password=?", (username, hashed_password))
-    result = c.fetchone()
-    
-    conn.close()
-    if result:
-        return result[0]
-    return None
+# Define the system prompt for the RAG assistant.
+RAG_SYSTEM_PROMPT = """
+You are a friendly and knowledgeable legal assistant that provides complete and insightful answers.
+Answer the user's question using only the context provided.
+When responding, you MUST NOT reference the existence of the context, directly or indirectly.
+Instead, treat the context as if it were entirely part of your working memory.
+""".strip()
 
-# Admin Dashboard
-def show_admin_dashboard():
-    st.title("Admin Dashboard")
-    st.write("Welcome, Admin!")
-    
-    # File uploader
-    uploaded_files = st.file_uploader(
-        "Upload PDF files", 
-        type=['pdf'], 
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files:
-        for pdf_file in uploaded_files:
-            st.write(f"Processing: {pdf_file.name}")
-            try:
-                process_pdf(pdf_file, pdf_file.name)
-                st.success(f"Successfully processed {pdf_file.name}")
-            except Exception as e:
-                st.error(f"Error processing {pdf_file.name}: {str(e)}")
-    
-    # Display existing PDF metadata with images
-    st.subheader("Processed PDF Pages")
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT file_name, page_number, keywords, page_image FROM pdf_metadata ORDER BY file_name, page_number")
-    results = c.fetchall()
-    
-    if results:
-        for result in results:
-            with st.expander(f"{result[0]} - Page {result[1]}"):
-                # Display image
-                if result[3]:  # if page_image exists
-                    image = Image.open(io.BytesIO(result[3]))
-                    st.image(image, caption=f"Page {result[1]}")
-                st.write("Keywords:", result[2])
-    else:
-        st.info("No PDF files have been processed yet.")
-    
-    conn.close()
+# ------------------------------------------
+# 1. Predefined Legal Taxonomy
+# ------------------------------------------
+LEGAL_TAXONOMY_KEYWORDS = [
+    # Core Legal Areas
+    "contract law", "tort law", "criminal law", "civil law", "constitutional law",
+    "property law", "family law", "intellectual property", "corporate law", "tax law",
+    "administrative law", "environmental law", "labor law", "immigration law",
+    "bankruptcy law", "securities law", "antitrust law", "international law",
 
-def calculate_keyword_similarity(query_keywords, stored_keywords):
-    # Convert comma-separated strings to sets of words
-    query_set = set(query_keywords.lower().split(','))
-    stored_set = set(stored_keywords.lower().split(','))
-    
-    # Calculate Jaccard similarity
-    intersection = len(query_set.intersection(stored_set))
-    union = len(query_set.union(stored_set))
-    
-    return intersection / union if union > 0 else 0
+    # Legal Processes & Procedures
+    "civil procedure", "criminal procedure", "evidence", "jurisdiction", "arbitration",
+    "mediation", "litigation", "appeal", "discovery", "pleadings", "injunction",
+    "class action", "settlement", "trial", "hearing", "deposition",
 
-def get_answer_from_gpt4(query, page_content):
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    
-    prompt = f"""Based on the following page content, please answer the user's question.
-                If the answer cannot be found in the content, please say so.
-                If user greets, please respond with a friendly greeting with a smiley face and a coversational tone. 
-                If user asks for help, please respond with a friendly greeting. 
-                
-                User Question: {query}
-                
-                Page Content:
-                {page_content}
-                """
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    if response.choices[0].message.content:
-        print(response.choices[0].message.content)
-    return response.choices[0].message.content.strip()
+    # Legal Concepts & Principles
+    "due process", "precedent", "statute", "regulation", "liability", "negligence",
+    "damages", "remedy", "standing", "jurisdiction", "venue", "immunity",
+    "consideration", "breach", "fraud", "defamation", "estoppel",
 
-def show_user_dashboard():
-    st.title("Chat Interface")
-    
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    # Display chat messages from history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if "image" in message:
-                st.image(message["image"], caption=message["image_caption"])
-    
-    # Accept user input
-    if prompt := st.chat_input("Ask your question here"):
-        # Display user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Generate keywords for the query
-        query_keywords = get_keywords_from_gpt4(prompt)
-        
-        # Find the most relevant page from the database
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute("SELECT page_content, keywords, page_image, file_name, page_number FROM pdf_metadata")
-        results = c.fetchall()
-        conn.close()
-        
-        # Calculate similarity scores and find the best match
-        best_score = -1
-        best_match = None
-        
-        for result in results:
-            page_content, stored_keywords, page_image, file_name, page_number = result
-            similarity_score = calculate_keyword_similarity(query_keywords, stored_keywords)
-            
-            if similarity_score > best_score:
-                best_score = similarity_score
-                best_match = result
-        
-        if best_match:
-            # Generate answer using GPT-4
-            answer = get_answer_from_gpt4(prompt, best_match[0])  # best_match[0] is page_content
-            
-            # Display assistant response with the relevant page image
-            with st.chat_message("assistant"):
-                st.markdown(answer)
-                if best_match[2]:  # If page_image exists
-                    image = Image.open(io.BytesIO(best_match[2]))
-                    st.image(image, caption=f"Reference: {best_match[3]} - Page {best_match[4]}")
-            
-            # Add to chat history
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer,
-                "image": best_match[2],
-                "image_caption": f"Reference: {best_match[3]} - Page {best_match[4]}"
-            })
-        else:
-            with st.chat_message("assistant"):
-                st.markdown("I couldn't find any relevant information in the database.")
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "I couldn't find any relevant information in the database."
-            })
+    # Rights & Protections
+    "civil rights", "human rights", "privacy rights", "discrimination",
+    "equal protection", "freedom of speech", "freedom of religion",
+    "right to counsel", "miranda rights", "fourth amendment", "fifth amendment",
 
-def get_keywords_from_gpt4(content):
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    
-    prompt = f"""Extract 15 relevant keywords from the following page_content. 
-                 Return only the keywords as a comma-separated list:
-                 <page_content>
-                 {content}
-                 </page_content>
-                 """
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    keywords = response.choices[0].message.content.strip()
-    return keywords
+    # Business & Commercial
+    "mergers and acquisitions", "securities regulation", "commercial law",
+    "partnership law", "llc law", "agency law", "employment law", "trade law",
+    "consumer protection", "unfair competition", "trademark", "patent", "copyright",
 
-def get_embeddings(text):
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    response = client.embeddings.create(
-        input=text,
-        model="text-embedding-ada-002"
-    )
-    if json.dumps(response.data[0].embedding):
-        print("Embedding generated successfully")
-    return json.dumps(response.data[0].embedding)  # Convert embedding vector to JSON string for storage
+    # Property & Real Estate
+    "real property", "personal property", "easement", "zoning", "land use",
+    "landlord tenant", "mortgage", "title", "deed", "conveyance",
 
-def process_pdf(pdf_file, file_name):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # Check if file already exists in database
-    c.execute("SELECT DISTINCT file_name, page_number FROM pdf_metadata WHERE file_name = ?", (file_name,))
-    existing_pages = {(row[0], row[1]) for row in c.fetchall()}
-    
-    if existing_pages:
-        st.warning(f"File {file_name} already exists in database. Skipping processing.")
-        conn.close()
-        return
-    
-    # Convert PDF file to bytes for pdf2image
-    pdf_bytes = pdf_file.read()
-    pdf_file.seek(0)  # Reset file pointer for PyPDF2
-    
-    # Convert PDF pages to images
-    images = convert_from_bytes(pdf_bytes)
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
-    
-    for page_num in range(len(pdf_reader.pages)):
-        with st.status(f"Processing page {page_num + 1} of {file_name}..."):
-            # Check if this specific page already exists
-            if (file_name, page_num + 1) in existing_pages:
-                st.info(f"Page {page_num + 1} already exists. Skipping...")
-                continue
-                
-            # Extract page content
-            page = pdf_reader.pages[page_num]
-            page_content = page.extract_text()
-            
-            # Convert page image to bytes
-            img = images[page_num]
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
-            
-            # Get keywords using GPT-4
-            st.write("Generating keywords...")
-            keywords = get_keywords_from_gpt4(page_content)
-            
-            # Get embeddings for page content
-            st.write("Generating embeddings...")
-            embeddings = get_embeddings(page_content)
-            
-            # Store in database
-            c.execute("""
-                INSERT INTO pdf_metadata (file_name, page_number, page_content, page_image, keywords, embeddings)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (file_name, page_num + 1, page_content, img_byte_arr, keywords, embeddings))
-            
-            conn.commit()
-            st.success(f"Page {page_num + 1} processed successfully")
-    
-    conn.close()
+    # Criminal Justice
+    "felony", "misdemeanor", "mens rea", "actus reus", "probable cause",
+    "search and seizure", "self defense", "double jeopardy", "plea bargain",
+
+    # Specialized Areas
+    "healthcare law", "education law", "elder law", "military law", "maritime law",
+    "aviation law", "sports law", "entertainment law", "cyber law", "blockchain law",
+    "data privacy", "artificial intelligence law", "environmental compliance",
+
+    # Government & Public Law
+    "municipal law", "state law", "federal law", "legislative process",
+    "executive power", "judicial review", "administrative procedure",
+    "public policy", "regulatory compliance", "government contracts",
+
+    # Alternative Dispute Resolution
+    "negotiation", "conciliation", "dispute resolution", "binding arbitration",
+    "non-binding arbitration", "mediation agreement", "settlement conference"
+]
+
+# ------------------------------------------
+# 2. Automatic Taxonomy Extraction (Regex-based)
+# ------------------------------------------
+
+
+def extract_taxonomy_keywords_automatic(text: str, taxonomy: list) -> list:
+    """
+    Return a list of taxonomy keywords that appear in the text using regex matching.
+    """
+    found_keywords = []
+    for keyword in taxonomy:
+        pattern = r'\b' + re.escape(keyword) + r'\b'
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            found_keywords.append(keyword)
+    return found_keywords
+
+# ------------------------------------------
+# 3. Intelligent Taxonomy Extraction (LLM-based)
+# ------------------------------------------
+
+
+def extract_taxonomy_keywords_intelligent(text: str, taxonomy: list) -> tuple:
+    """
+    Uses GPT-4o-mini to extract taxonomy keywords from the page content.
+    The assistant is provided with both the page content and the list of legal taxonomy keywords.
+    It returns a tuple (exact_matches, related_keywords) where:
+      - exact_matches: a list of keywords that exactly appear in the content (if any)
+      - related_keywords: a list of 5 highly relevant taxonomy keywords.
+    If no exact matches are found, only related_keywords are provided.
+    """
+    try:
+        # Mimic the fallback function style.
+        client = openai.OpenAI(
+            api_key=st.session_state.user_env["OPENAI_API_KEY"])
+        system_prompt = (
+            "You are a legal taxonomy extraction assistant. "
+            "Given the following page content and a list of legal taxonomy keywords, "
+            "identify all keywords from the list that exactly appear in the page content. "
+            "Then, suggest 5 additional legal taxonomy keywords that are highly relevant to the content. "
+            "If no exact matches are found, just provide 5 related keywords. "
+            "Return your answer as a JSON object with two keys: exact_matches and related_keywords. "
+            "Do not include any extra text."
+        )
+        user_prompt = f"Taxonomy keywords: {', '.join(taxonomy)}\n\nPage content:\n{text}"
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=1024,
+            temperature=0.7
+        )
+        result_text = response.choices[0].message.content.strip()
+        logger.info("LLM extraction result: " + result_text)
+        try:
+            data = json.loads(result_text)
+        except Exception as parse_error:
+            logger.error(
+                "JSON parsing error in intelligent extraction: " + str(parse_error))
+            logger.error("LLM result was: " + result_text)
+            return ([], [])
+        exact_matches = data.get("exact_matches", [])
+        related_keywords = data.get("related_keywords", [])
+        logger.info(f"Exact matches: {exact_matches}")
+        logger.info(f"Related keywords: {related_keywords}")
+        return (exact_matches, related_keywords)
+    except Exception as e:
+        logger.error("LLM extraction error: " + str(e))
+
+        return ([], [])
+
+# ------------------------------------------
+# 4. Helper Function: Parse Chunk Text for Metadata
+# ------------------------------------------
+
+
+def parse_chunk_text(chunk_text: str):
+    """
+    Expects the chunk text to be formatted as:
+
+    ===PAGE_INFO===
+    Document: <doc_name>
+    DocHash: <doc_hash>
+    Page: <page_number>
+    Taxonomy: <header_line>
+    ===CONTENT===
+    <actual page content>
+
+    For Intelligent mode, header_line may be formatted as:
+    <exact_matches> | Related: <related_keywords>
+
+    Returns a tuple: (doc_name, doc_hash, page_number, taxonomy_info, actual_content)
+    taxonomy_info is returned as a string.
+    """
+    doc_name = "Unknown"
+    doc_hash = "Unknown"
+    page_num = "Unknown"
+    taxonomy_info = ""
+    content = chunk_text
+    if chunk_text.startswith("===PAGE_INFO==="):
+        parts = chunk_text.split("===CONTENT===")
+        if len(parts) >= 2:
+            header = parts[0]
+            content = "===CONTENT===".join(parts[1:]).strip()
+            for line in header.splitlines():
+                if line.startswith("Document:"):
+                    doc_name = line.split("Document:")[1].strip()
+                elif line.startswith("DocHash:"):
+                    doc_hash = line.split("DocHash:")[1].strip()
+                elif line.startswith("Page:"):
+                    page_num = line.split("Page:")[1].strip()
+                elif line.startswith("Taxonomy:"):
+                    taxonomy_info = line.split("Taxonomy:")[1].strip()
+    return doc_name, doc_hash, page_num, taxonomy_info, content
+
+# ------------------------------------------
+# 5. Configuration Initialization
+# ------------------------------------------
+
+
+def initialize_config(openai_key: str, cohere_key: str, db_url: str) -> RAGLiteConfig:
+    try:
+        os.environ["OPENAI_API_KEY"] = openai_key
+        os.environ["COHERE_API_KEY"] = cohere_key
+        return RAGLiteConfig(
+            db_url=db_url,
+            llm="gpt-4o",
+            embedder="text-embedding-3-large",
+            embedder_normalize=True,
+            chunk_max_size=8000,
+            embedder_sentence_window_size=2,
+            reranker=Reranker("cohere", api_key=cohere_key, lang="en")
+        )
+    except Exception as e:
+        raise ValueError(f"Configuration error: {e}")
+
+# ------------------------------------------
+# 6. Document Processing: Page-Wise Chunking with Metadata Injection and Progress UI
+# ------------------------------------------
+
+
+def process_document(file_path: str, doc_hash: str, doc_name: str) -> bool:
+    try:
+        if not st.session_state.get('my_config'):
+            raise ValueError("Configuration not initialized")
+
+        # Sanitize document name to avoid encoding issues
+        doc_name = doc_name.encode('ascii', 'replace').decode('ascii')
+
+        with open(file_path, "rb") as f:
+            pdf_reader = PyPDF2.PdfReader(f)
+            num_pages = len(pdf_reader.pages)
+            logger.info(f"Processing PDF '{doc_name}' with {num_pages} pages.")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for page_index in range(num_pages):
+                status_text.text(
+                    f"Processing page {page_index+1} of {num_pages}...")
+                with st.spinner(f"Processing page {page_index+1}..."):
+                    try:
+                        page = pdf_reader.pages[page_index]
+
+                        # Extract text and handle encoding more robustly
+                        raw_text = page.extract_text() or ""
+
+                        # Convert text to plain ASCII, replacing non-ASCII characters
+                        text = raw_text.encode(
+                            'ascii', 'replace').decode('ascii')
+
+                        # Remove any remaining problematic characters
+                        text = ''.join(
+                            char for char in text if ord(char) < 128)
+
+                        extraction_mode = st.session_state.get(
+                            "extraction_mode", "Automatic")
+
+                        if extraction_mode == "Intelligent":
+                            exact_matches, related_keywords = extract_taxonomy_keywords_intelligent(
+                                text, LEGAL_TAXONOMY_KEYWORDS)
+                            logger.info(f"Exact matches: {exact_matches}")
+                            logger.info(
+                                f"Related keywords: {related_keywords}")
+                            if exact_matches:
+                                header_line = f"{', '.join(exact_matches)} | Related: {', '.join(related_keywords)}"
+                            else:
+                                header_line = f"{', '.join(related_keywords)}"
+                        else:
+                            tax_keywords = extract_taxonomy_keywords_automatic(
+                                text, LEGAL_TAXONOMY_KEYWORDS)
+                            header_line = f"{', '.join(tax_keywords) if tax_keywords else 'None'}"
+
+                        # Create safe filename for temporary file
+                        safe_doc_name = ''.join(
+                            c for c in doc_name if c.isalnum() or c in ('-', '_'))
+                        temp_page_file = f"temp_page_{safe_doc_name}_{page_index+1}.txt"
+
+                        # Write the temporary file using ASCII encoding
+                        with open(temp_page_file, "w", encoding='ascii', errors='replace') as tmp:
+                            header = (
+                                "===PAGE_INFO===\n"
+                                f"Document: {doc_name}\n"
+                                f"DocHash: {doc_hash}\n"
+                                f"Page: {page_index+1}\n"
+                                f"Taxonomy: {header_line}\n"
+                                "===CONTENT===\n"
+                            )
+                            tmp.write(header)
+                            tmp.write(text)
+
+                        insert_document(Path(temp_page_file),
+                                        config=st.session_state.my_config)
+                        os.remove(temp_page_file)
+                        progress_bar.progress((page_index + 1) / num_pages)
+
+                    except Exception as page_error:
+                        logger.error(
+                            f"Error processing page {page_index+1}: {str(page_error)}")
+                        continue
+
+            status_text.text("Processing complete!")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error processing document: {str(e)}")
+        return False
+
+# ------------------------------------------
+# 7. Search and Fallback Functions
+# ------------------------------------------
+
+
+def perform_search(query: str) -> List:
+    try:
+        chunk_ids, scores = hybrid_search(
+            query, num_results=10, config=st.session_state.my_config)
+        if not chunk_ids:
+            return []
+        chunks = retrieve_chunks(chunk_ids, config=st.session_state.my_config)
+        return rerank_chunks(query, chunks, config=st.session_state.my_config)
+    except Exception as e:
+        logger.error(f"Search error: {str(e)}")
+        return []
+
+
+def handle_fallback(query: str) -> str:
+    try:
+        client = openai.OpenAI(
+            api_key=st.session_state.user_env["OPENAI_API_KEY"])
+        system_prompt = (
+            "You are a helpful AI assistant. When you don't know something, "
+            "be honest about it. Provide clear, concise, and accurate responses. "
+            "If the question is not related to any specific document, use your general knowledge to answer."
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            max_tokens=1024,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Fallback error: {str(e)}")
+        st.error(f"Fallback error: {str(e)}")
+        return "I apologize, but I encountered an error while processing your request. Please try again."
+
+# ------------------------------------------
+# 8. Main Streamlit App
+# ------------------------------------------
+
 
 def main():
-    st.set_page_config(page_title="POC", page_icon="📃")
-    
-    # Initialize the database
-    init_db()
-    
-    # Session state initialization
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.role = None
-
-    # If not logged in, show login form
-    if not st.session_state.logged_in:
-        st.title("Login")
-        
-        # Create login form
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submit_button = st.form_submit_button("Login")
-            
-            if submit_button:
-                role = verify_login(username, password)
-                if role:
-                    st.session_state.logged_in = True
-                    st.session_state.role = role
-                    st.success("Login successful!")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password")
-    
-    # Show appropriate dashboard based on role
-    else:
-        if st.session_state.role == "admin":
-            show_admin_dashboard()
+    st.set_page_config(page_title="Innodata - Taxonomy RAG POC", layout="wide")
+    for state_var in ['chat_history', 'documents_loaded', 'my_config', 'user_env', 'processed_pdf_hashes', 'pdf_files']:
+        if state_var not in st.session_state:
+            if state_var == 'chat_history':
+                st.session_state[state_var] = []
+            elif state_var == 'documents_loaded':
+                st.session_state[state_var] = False
+            elif state_var == 'my_config':
+                st.session_state[state_var] = None
+            elif state_var == 'user_env':
+                st.session_state[state_var] = {}
+            elif state_var == 'processed_pdf_hashes':
+                st.session_state[state_var] = set()
+            elif state_var == 'pdf_files':
+                st.session_state[state_var] = {}
+    with st.sidebar:
+        st.title("Configuration")
+        openai_key = st.text_input("OpenAI API Key", value=st.session_state.get(
+            'openai_key', ''), type="password", placeholder="sk-...")
+        cohere_key = st.text_input("Cohere API Key", value=st.session_state.get(
+            'cohere_key', ''), type="password", placeholder="Enter Cohere key")
+        db_url = st.text_input("Database URL", value=st.session_state.get(
+            'db_url', 'sqlite:///raglite.sqlite'), placeholder="sqlite:///raglite.sqlite")
+        if not st.session_state.documents_loaded:
+            extraction_mode = st.radio("Select Taxonomy Extraction Mode", options=[
+                                       "Automatic", "Intelligent"], index=0)
+            st.session_state["extraction_mode"] = extraction_mode
         else:
-            show_user_dashboard()
-        
-        # Add logout button
-        if st.sidebar.button("Logout"):
-            st.session_state.logged_in = False
-            st.session_state.role = None
-            st.rerun()
+            st.write("Taxonomy Extraction Mode: " +
+                     st.session_state.get("extraction_mode", "Automatic"))
+        if st.button("Save Configuration"):
+            try:
+                if not all([openai_key, cohere_key, db_url]):
+                    st.error("All fields are required!")
+                    return
+                st.session_state['openai_key'] = openai_key
+                st.session_state['cohere_key'] = cohere_key
+                st.session_state['db_url'] = db_url
+                st.session_state.my_config = initialize_config(
+                    openai_key=openai_key, cohere_key=cohere_key, db_url=db_url)
+                st.session_state.user_env = {"OPENAI_API_KEY": openai_key}
+                st.success("Configuration saved successfully!")
+            except Exception as e:
+                st.error(f"Configuration error: {str(e)}")
+    st.title("Innodata - Taxonomy POC - RAG with Hybrid Search")
+    if not st.session_state.documents_loaded:
+        uploaded_files = st.file_uploader("Upload PDF legal documents", type=[
+                                          "pdf"], accept_multiple_files=True, key="pdf_uploader")
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                file_bytes = uploaded_file.getvalue()
+                file_hash = hashlib.md5(file_bytes).hexdigest()
+                if file_hash in st.session_state.processed_pdf_hashes:
+                    st.warning(
+                        f"'{uploaded_file.name}' has already been uploaded. Skipping duplicate.")
+                    continue
+                else:
+                    st.session_state.processed_pdf_hashes.add(file_hash)
+                    st.session_state.pdf_files[file_hash] = file_bytes
+                    temp_path = f"temp_{uploaded_file.name}"
+                    with open(temp_path, "wb") as f:
+                        f.write(file_bytes)
+                    with st.spinner(f"Processing {uploaded_file.name}..."):
+                        if process_document(temp_path, file_hash, uploaded_file.name):
+                            st.success(
+                                f"Successfully processed: {uploaded_file.name}")
+                        else:
+                            st.error(
+                                f"Failed to process: {uploaded_file.name}")
+                    os.remove(temp_path)
+            st.session_state.documents_loaded = True
+            st.success(
+                "All documents are ready! You can now ask questions about them.")
+    else:
+        st.info("Documents already processed. You can ask your questions below.")
+    if st.session_state.documents_loaded:
+        for msg in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(msg[0])
+            with st.chat_message("assistant"):
+                st.write(msg[1])
+        user_input = st.chat_input("Ask a question about the documents...")
+        if user_input:
+            with st.chat_message("user"):
+                st.write(user_input)
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                try:
+                    reranked_chunks = perform_search(query=user_input)
+                    if not reranked_chunks or len(reranked_chunks) == 0:
+                        logger.info(
+                            "No relevant documents found. Falling back to general LLM.")
+                        st.info(
+                            "No relevant documents found. Using general knowledge to answer.")
+                        full_response = handle_fallback(user_input)
+                        message_placeholder.markdown(full_response)
+                    else:
+                        best_chunk = reranked_chunks[0]
+                        raw_text = best_chunk.body
+                        doc_name, doc_hash, page_number, taxonomy_info, content_without_header = parse_chunk_text(
+                            raw_text)
+                        formatted_messages = [
+                            {"role": "user" if i %
+                                2 == 0 else "assistant", "content": msg}
+                            for i, msg in enumerate([m for pair in st.session_state.chat_history for m in pair])
+                            if msg
+                        ]
+                        response_stream = rag(
+                            prompt=user_input,
+                            system_prompt=RAG_SYSTEM_PROMPT,
+                            search=hybrid_search,
+                            messages=formatted_messages,
+                            max_contexts=5,
+                            config=st.session_state.my_config
+                        )
+                        full_response = ""
+                        for chunk in response_stream:
+                            full_response += chunk
+                            message_placeholder.markdown(full_response + "▌")
+                        message_placeholder.markdown(full_response)
+                        with st.expander("Top Matched Source Information:", expanded=False):
+                            st.write(f"**Document:** {doc_name}")
+                            st.write(f"**Page:** {page_number}")
+                            if st.session_state.get("extraction_mode") == "Intelligent" and "|" in taxonomy_info:
+                                parts = taxonomy_info.split("|")
+                                exact_matches = parts[0].strip()
+                                related_keywords = parts[1].replace(
+                                    "Related:", "").strip()
+                                st.write(f"**Exact Matches:** {exact_matches}")
+                                st.write(
+                                    f"**Related Keywords:** {related_keywords}")
+                            else:
+                                st.write(
+                                    f"**Taxonomy Keywords:** {taxonomy_info if taxonomy_info else 'None'}")
+                            if doc_hash in st.session_state.pdf_files:
+                                pdf_bytes = st.session_state.pdf_files[doc_hash]
+                                try:
+                                    page_num_int = int(page_number)
+                                    pages = convert_from_bytes(
+                                        pdf_bytes, first_page=page_num_int, last_page=page_num_int)
+                                    if pages:
+                                        st.image(
+                                            pages[0], caption=f"{doc_name} - Page {page_number}")
+                                except Exception as e:
+                                    st.error(
+                                        "Could not convert PDF page to image: " + str(e))
+                    st.session_state.chat_history.append(
+                        (user_input, full_response))
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+    else:
+        if not st.session_state.my_config:
+            st.info("Please configure your API keys to get started.")
+        else:
+            st.info("Please upload some documents to get started.")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
