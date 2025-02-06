@@ -4,29 +4,67 @@ A powerful Q&A application for legal documents that leverages Hybrid Search and 
 
 ## Features
 
-- **Taxonomy-Aware Document Processing**:
-    - Automatic legal taxonomy keyword extraction
-    - PDF document processing with metadata enrichment
-    - Page-level document chunking with taxonomy information
-    - Visual PDF page display for source verification
+- **Dual-Mode Taxonomy Extraction**:
+    - **Automatic Mode**: 
+        - Fast regex-based keyword matching
+        - Identifies exact matches from robust predefined legal taxonomy
+        - Efficient for quick document processing
+        - No API calls required
+    - **Intelligent Mode**:
+        - LLM-powered taxonomy analysis using GPT-4o-mini
+        - Identifies both exact matches and semantically related concepts
+        - Provides additional context through related keyword suggestions
+        - More nuanced understanding of legal concepts
 
 - **Advanced Search and Retrieval**:
-    - Hybrid search combining semantic and keyword matching
-    - Intelligent reranking for better context selection
-    - Taxonomy-aware result presentation
-    - Fallback to general knowledge for non-document queries
+    - **Hybrid Search System**:
+        - Combines semantic search with traditional keyword matching
+        - Uses OpenAI's text-embedding-3-large for semantic understanding
+        - Supports up to 10 initial search results (retrieves the top 10 most relevant document chunks before reranking)
+        - Optimized chunk size of 8000 tokens with 2-sentence overlapping windows (each document chunk contains 8000 tokens and overlaps with adjacent chunks by 2 sentences to maintain context)
+    
+    - **Intelligent Reranking**:
+        - Powered by Cohere's reranking technology
+        - Re-orders search results based on relevance to query
+        - Improves context selection for more accurate answers
+        - Language-aware reranking with English optimization
 
-- **Multi-Model Integration**:
-  - GPT-4o models for text generation
-  - OpenAI text-embedding-3-large for embeddings
-  - Cohere for reranking
+    - **Fallback Mechanism**:
+        - Graceful degradation to general knowledge when no relevant documents found
+        - Uses GPT-4o-mini for general legal knowledge
+        - Maintains conversation context
+
+- **Document Processing and UI**:
+    - Page-level document chunking with metadata enrichment
+    - Visual PDF page display for source verification
+    - Progress tracking during document processing
+    - Interactive chat interface with conversation history
+
+- **Template-Based Configuration**:
+    - The application uses Jinja2 templates for managing prompts and taxonomies, following software engineering best practices:
+
+    - **Separation of Concerns**:
+        - Prompts and taxonomies are maintained in separate template files
+        - `templates/prompts.j2`: Contains all system prompts (RAG, extraction, fallback)
+        - `templates/taxonomy.j2`: Contains the comprehensive legal taxonomy keywords
+        
+    - **Benefits**:
+        - **Maintainability**: Edit prompts and taxonomies without touching application code
+        - **Version Control**: Track changes to prompts and taxonomies separately
+        - **Environment Flexibility**: Support different prompts/taxonomies per environment
+        - **Reusability**: Templates can be shared across multiple applications
+        - **Readability**: Clean separation between logic and content
+
 
 ## Prerequisites
 
 You'll need the following API keys:
 
 1. **API Keys**:
-   - [OpenAI API key](https://platform.openai.com/api-keys) for GPT-4o and embeddings
+   - [OpenAI API key](https://platform.openai.com/api-keys) for:
+     - GPT-4o model (chat completions)
+     - text-embedding-3-large (embeddings)
+     - GPT-4o-mini (intelligent taxonomy extraction)
    - [Cohere API key](https://dashboard.cohere.com/api-keys) for reranking
 
 2. **Database Setup** (Optional):
@@ -41,8 +79,10 @@ You'll need the following API keys:
    ```
 
 2. **Required System Dependencies**:
-   - Poppler (for PDF processing)
-   - Python 3.8+
+   - install both pypandoc and Pandoc via conda
+   ```bash
+   conda install -c conda-forge pypandoc pandoc
+   ```
 
 ## Usage
 
@@ -55,31 +95,37 @@ You'll need the following API keys:
    - Enter your OpenAI API key
    - Enter your Cohere API key
    - Configure database URL (optional, defaults to SQLite)
+   - Select taxonomy extraction mode (Automatic or Intelligent)
    - Click "Save Configuration"
 
 3. **Upload Documents**:
    - Upload PDF legal documents
    - The system will automatically:
      - Process documents page by page
-     - Extract legal taxonomy keywords
+     - Extract legal taxonomy keywords based on selected mode
      - Create searchable chunks with metadata
+     - Display processing progress
 
 4. **Ask Questions**:
    - Ask questions about your legal documents
    - View source information including:
      - Original document and page number
-     - Relevant taxonomy keywords
+     - Extracted taxonomy keywords (exact matches and related concepts in Intelligent mode)
      - PDF page preview
    - System automatically falls back to general knowledge for non-document questions
 
 ## Legal Taxonomy
 
-The system includes built-in recognition for key legal concepts including:
-- Contract law
-- Tort law
-- Criminal law
-- Civil rights
-- Constitutional law
-- Property law
-- Family law
-- And many more (see the code for the full list)
+The system includes built-in recognition for over 100 legal concepts across various categories:
+- Core Legal Areas (e.g., contract law, tort law, criminal law)
+- Legal Processes & Procedures (e.g., civil procedure, arbitration)
+- Legal Concepts & Principles (e.g., due process, liability)
+- Rights & Protections (e.g., civil rights, privacy rights)
+- Business & Commercial (e.g., securities regulation, intellectual property)
+- Property & Real Estate (e.g., zoning, land use)
+- Criminal Justice (e.g., felony, probable cause)
+- Specialized Areas (e.g., healthcare law, cyber law)
+- Government & Public Law (e.g., administrative law, regulatory compliance)
+- Alternative Dispute Resolution (e.g., mediation, arbitration)
+
+See the code for the complete list of supported taxonomy keywords.

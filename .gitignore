@@ -7,12 +7,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Flashrank cache
+.flashrank_cache
+
 # Environment
 .env
 .venv
 env/
 venv/
 ENV/
+
 
 # IDE
 .vscode/
