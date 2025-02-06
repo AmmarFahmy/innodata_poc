@@ -12,7 +12,7 @@ from pathlib import Path
 import openai
 import time
 import warnings
-from jinja2 import Environment, FileSystemLoader
+
 from pdf2image import convert_from_bytes
 
 # Setup logging and ignore specific warnings.
@@ -20,28 +20,66 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*torch.classes.*")
 
-# Initialize Jinja2 environment
-jinja_env = Environment(loader=FileSystemLoader('templates'))
-
-# Load templates
-prompts_template = jinja_env.get_template('prompts.j2')
-taxonomy_template = jinja_env.get_template('taxonomy.j2')
-
-# Render templates to get variables
-template_vars = {}
-exec(prompts_template.render(), template_vars)
-exec(taxonomy_template.render(), template_vars)
-
-# Extract variables from templates
-RAG_SYSTEM_PROMPT = template_vars['RAG_SYSTEM_PROMPT'].strip()
-INTELLIGENT_EXTRACTION_PROMPT = template_vars['INTELLIGENT_EXTRACTION_PROMPT'].strip(
-)
-FALLBACK_SYSTEM_PROMPT = template_vars['FALLBACK_SYSTEM_PROMPT'].strip()
-LEGAL_TAXONOMY_KEYWORDS = template_vars['LEGAL_TAXONOMY_KEYWORDS']
+# Define the system prompt for the RAG assistant.
+RAG_SYSTEM_PROMPT = """
+You are a friendly and knowledgeable legal assistant that provides complete and insightful answers.
+Answer the user's question using only the context provided.
+When responding, you MUST NOT reference the existence of the context, directly or indirectly.
+Instead, treat the context as if it were entirely part of your working memory.
+""".strip()
 
 # ------------------------------------------
 # 1. Predefined Legal Taxonomy
 # ------------------------------------------
+LEGAL_TAXONOMY_KEYWORDS = [
+    # Core Legal Areas
+    "contract law", "tort law", "criminal law", "civil law", "constitutional law",
+    "property law", "family law", "intellectual property", "corporate law", "tax law",
+    "administrative law", "environmental law", "labor law", "immigration law",
+    "bankruptcy law", "securities law", "antitrust law", "international law",
+
+    # Legal Processes & Procedures
+    "civil procedure", "criminal procedure", "evidence", "jurisdiction", "arbitration",
+    "mediation", "litigation", "appeal", "discovery", "pleadings", "injunction",
+    "class action", "settlement", "trial", "hearing", "deposition",
+
+    # Legal Concepts & Principles
+    "due process", "precedent", "statute", "regulation", "liability", "negligence",
+    "damages", "remedy", "standing", "jurisdiction", "venue", "immunity",
+    "consideration", "breach", "fraud", "defamation", "estoppel",
+
+    # Rights & Protections
+    "civil rights", "human rights", "privacy rights", "discrimination",
+    "equal protection", "freedom of speech", "freedom of religion",
+    "right to counsel", "miranda rights", "fourth amendment", "fifth amendment",
+
+    # Business & Commercial
+    "mergers and acquisitions", "securities regulation", "commercial law",
+    "partnership law", "llc law", "agency law", "employment law", "trade law",
+    "consumer protection", "unfair competition", "trademark", "patent", "copyright",
+
+    # Property & Real Estate
+    "real property", "personal property", "easement", "zoning", "land use",
+    "landlord tenant", "mortgage", "title", "deed", "conveyance",
+
+    # Criminal Justice
+    "felony", "misdemeanor", "mens rea", "actus reus", "probable cause",
+    "search and seizure", "self defense", "double jeopardy", "plea bargain",
+
+    # Specialized Areas
+    "healthcare law", "education law", "elder law", "military law", "maritime law",
+    "aviation law", "sports law", "entertainment law", "cyber law", "blockchain law",
+    "data privacy", "artificial intelligence law", "environmental compliance",
+
+    # Government & Public Law
+    "municipal law", "state law", "federal law", "legislative process",
+    "executive power", "judicial review", "administrative procedure",
+    "public policy", "regulatory compliance", "government contracts",
+
+    # Alternative Dispute Resolution
+    "negotiation", "conciliation", "dispute resolution", "binding arbitration",
+    "non-binding arbitration", "mediation agreement", "settlement conference"
+]
 
 # ------------------------------------------
 # 2. Automatic Taxonomy Extraction (Regex-based)
@@ -74,9 +112,18 @@ def extract_taxonomy_keywords_intelligent(text: str, taxonomy: list) -> tuple:
     If no exact matches are found, only related_keywords are provided.
     """
     try:
+        # Mimic the fallback function style.
         client = openai.OpenAI(
             api_key=st.session_state.user_env["OPENAI_API_KEY"])
-        system_prompt = INTELLIGENT_EXTRACTION_PROMPT
+        system_prompt = (
+            "You are a legal taxonomy extraction assistant. "
+            "Given the following page content and a list of legal taxonomy keywords, "
+            "identify all keywords from the list that exactly appear in the page content. "
+            "Then, suggest 5 additional legal taxonomy keywords that are highly relevant to the content. "
+            "If no exact matches are found, just provide 5 related keywords. "
+            "Return your answer as a JSON object with two keys: exact_matches and related_keywords. "
+            "Do not include any extra text."
+        )
         user_prompt = f"Taxonomy keywords: {', '.join(taxonomy)}\n\nPage content:\n{text}"
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -103,6 +150,7 @@ def extract_taxonomy_keywords_intelligent(text: str, taxonomy: list) -> tuple:
         return (exact_matches, related_keywords)
     except Exception as e:
         logger.error("LLM extraction error: " + str(e))
+
         return ([], [])
 
 # ------------------------------------------
@@ -283,7 +331,11 @@ def handle_fallback(query: str) -> str:
     try:
         client = openai.OpenAI(
             api_key=st.session_state.user_env["OPENAI_API_KEY"])
-        system_prompt = FALLBACK_SYSTEM_PROMPT
+        system_prompt = (
+            "You are a helpful AI assistant. When you don't know something, "
+            "be honest about it. Provide clear, concise, and accurate responses. "
+            "If the question is not related to any specific document, use your general knowledge to answer."
+        )
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
